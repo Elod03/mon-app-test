@@ -5,51 +5,46 @@ import "dotenv/config";
 
 const app = express();
 
-// IMPORTANT : pour vérifier les signatures GitHub, vous devez utiliser
-// les *octets bruts* du corps de la requête.
 app.post("/webhook/github", express.raw({ type: "*/*" }), async (req, res) => {
   try {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
-    if (!secret) {
-      return res.status(500).send("GITHUB_WEBHOOK_SECRET manquant");
-    }
+    if (!secret) return res.status(500).send("GITHUB_WEBHOOK_SECRET manquant");
 
-    // GitHub envoie la signature dans X-Hub-Signature-256 lorsqu'un secret est configuré.
     const sigHeader = req.header("X-Hub-Signature-256");
-    if (!sigHeader) {
-      return res.status(401).send("En-tête de signature manquant");
-    }
+    if (!sigHeader) return res.status(401).send("En-tête de signature manquant");
 
     const expected =
       "sha256=" +
       crypto.createHmac("sha256", secret).update(req.body).digest("hex");
 
-    const ok = crypto.timingSafeEqual(
-      Buffer.from(sigHeader),
-      Buffer.from(expected)
-    );
+    // ✅ évite le crash timingSafeEqual (sinon 502)
+    const a = Buffer.from(sigHeader);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return res.status(401).send("Signature invalide");
 
-    if (!ok) {
-      return res.status(401).send("Signature invalide");
-    }
+    const ok = crypto.timingSafeEqual(a, b);
+    if (!ok) return res.status(401).send("Signature invalide");
 
-    // Parser le payload JSON après vérification de la signature
+    // Parser le payload JSON après vérification
     const payload = JSON.parse(req.body.toString("utf8"));
 
-    // Agir uniquement sur les événements push
     const event = req.header("X-GitHub-Event");
-    if (event !== "push") {
-      return res.status(200).send("Événement ignoré");
+
+    // ✅ répondre OK au ping (GitHub test)
+    if (event === "ping") {
+      return res.status(200).send("pong");
     }
 
+    // Agir uniquement sur les push
+    if (event !== "push") return res.status(200).send("Événement ignoré");
+
     const targetBranch = process.env.TARGET_BRANCH || "main";
-    const ref = payload?.ref; // ex. "refs/heads/main"
+    const ref = payload?.ref;
 
     if (ref !== `refs/heads/${targetBranch}`) {
       return res.status(200).send(`Branche ignorée ${ref}`);
     }
 
-    // Déclencher le script de déploiement
     const script = process.platform === "win32" ? "deploy.ps1" : "deploy.sh";
     const cmd = process.platform === "win32" ? "powershell.exe" : "bash";
     const args =
@@ -57,23 +52,12 @@ app.post("/webhook/github", express.raw({ type: "*/*" }), async (req, res) => {
         ? ["-ExecutionPolicy", "Bypass", "-File", script]
         : [script];
 
-    const child = spawn(cmd, args, {
-      env: process.env,
-      stdio: "inherit",
-    });
+    spawn(cmd, args, { env: process.env, stdio: "inherit" });
 
-    child.on("exit", (code) => {
-      if (code === 0) {
-        console.log("Déploiement terminé avec succès");
-      } else {
-        console.error("Échec du déploiement, code", code);
-      }
-    });
-
-    res.status(200).send("Déploiement déclenché");
+    return res.status(200).send("Déploiement déclenché");
   } catch (e) {
     console.error(e);
-    res.status(500).send("Erreur serveur");
+    return res.status(500).send("Erreur serveur");
   }
 });
 
